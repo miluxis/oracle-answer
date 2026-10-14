@@ -57,6 +57,49 @@ DATABASE_URL=postgresql+psycopg://oracle:强密码@127.0.0.1:5432/oracle_answer
 
 > 本地开发时**不要设置** `DATABASE_URL`，代码会默认使用 `data/oracle.db`（SQLite）。这就是双引擎的切换点。
 
+### 4.1 必须做：数据库不对外网开放 ⚠️
+
+应用与数据库同机时，**最容易漏掉的安全项**。如果 5432 端口暴露在公网，
+等于给整个数据库开了后门——即使应用层被攻击，攻击者也能直接连库。
+
+**第一步：只监听本机**
+
+```bash
+sudo nano /etc/postgresql/16/main/postgresql.conf
+```
+
+确认或改为：
+
+```
+listen_addresses = 'localhost'
+```
+
+> Ubuntu 的默认配置通常已是 `localhost`，但**云厂商镜像经常改成 `*`**，
+> 装完一定要亲自确认一次。
+
+**第二步：确认云厂商安全组没放行 5432**
+
+在阿里云 /腾讯云控制台的防火墙规则里，**只保留 22、80、443**，
+删掉任何与 5432、3306 相关的规则。
+
+**第三步：验证**
+
+```bash
+# 本机应能连
+psql -h 127.0.0.1 -U oracle -d oracle_answer -c 'SELECT 1;'
+
+# 从公网地址应连不上（把IP 换成你的服务器公网 IP）
+psql -h 你的公网IP -U oracle -d oracle_answer -c 'SELECT 1;'
+# 预期：could not connect to server（超时或拒绝）
+```
+
+**第四步：改完要重启**
+
+```bash
+sudo systemctl restart postgresql
+sudo systemctl status postgresql
+```
+
 ---
 
 ## 5. 环境变量文件
@@ -226,7 +269,25 @@ sudo certbot --nginx -d 你的域名
 - [ ] `.env` 权限 600，属主为 `oracle`
 - [ ] Nginx 配置正确，`/api/health` 返回 `{"ok":true}`
 - [ ] 浏览器实测：注册 → 退出 → 登录 → 保存片刻 → 我的片刻能看到
-- [ ] 数据库备份策略已配置（见下）
+- [ ] 管理员后台实测：上传一张图片 → 添加一个甲骨字 → 前台能抽到吗（见 15.3）
+
+### 安全项（同机部署必查）
+
+- [ ] **PostgreSQL 只监听本机**：`postgresql.conf` 里 `listen_addresses = 'localhost'`
+- [ ] **云厂商安全组只放行 22 / 80 / 443**，已删除任何 5432 相关规则
+- [ ] 从公网 IP 连 5432 **连不上**（验证方法见 4.1）
+- [ ] `pg_hba.conf` 里应用用的连接方式为 `scram-sha-256`，非 `trust`
+
+### 备份项
+
+- [ ] 每日 `pg_dump` 定时任务已生效（`ls /etc/cron.daily/` 能看到脚本）
+- [ ] **备份已同步到对象存储**（OSS/COS），本地不存副本也行
+- [ ] `web/assets/uploads/` 已纳入备份
+- [ ] **已做过一次恢复演练**，确认备份能真的灌回去（见 11.1）
+
+### 迁移项
+
+- [ ] 若线上库有旧结构，已执行 15.2 节的 `ALTER TABLE moments DROP CONSTRAINT`
 
 ---
 
@@ -262,9 +323,123 @@ sudo systemctl restart oracle-answer
 
 > schema 变更建议用 Alembic 管理。当前 `seed.py` 走的是「表不存在则创建」，若后续表结构有变，请补迁移脚本而不是删库重建——生产库里已有真实用户数据。
 
+### 11.1 必须做：备份要传到机器外面 ⚠️
+
+**只存在本机的备份等于没有备份。** 云厂商磁盘故障、误删文件、机房级事故时，
+机器和数据会一起消失。
+
+按当前规模估算，**5 万用户时数据库也只有约 372 MB**，
+gzip 后的备份通常不到 1 MB，传到对象存储几乎没有成本。
+
+#### 配置对象存储
+
+**阿里云 OSS**
+
+```bash
+sudo apt install -y ossutil
+ossutil config      # 填 Endpoint / AccessKey / SecretKey
+
+# 测试上传
+ossutil cp /var/backups/oracle/oracle-$(date +\%F).sql.gz oss://你的bucket/backups/
+```
+
+**腾讯云 COS**
+
+```bash
+coscli config
+coscli cp /var/backups/oracle/oracle-$(date +\%F).sql.gz cos://你的bucket/backups/
+```
+
+#### 把同步加进定时任务
+
+替换 `/etc/cron.daily/oracle-backup` 的内容：
+
+```bash
+#!/bin/bash
+set -e
+mkdir -p /var/backups/oracle
+
+STAMP=$(date +\%F)
+LOCAL=/var/backups/oracle/oracle-$STAMP.sql.gz
+
+sudo -u postgres pg_dump oracle_answer | gzip > "$LOCAL"
+
+# 同步到对象存储；用腾讯云时把ossutil 换成 coscli cp
+ossutil cp "$LOCAL" oss://你的bucket/backups/ --update
+
+# 本地只留 7 天；对象存储侧建议配生命周期规则保留 90 天
+find /var/backups/oracle -name '*.sql.gz' -mtime +7 -delete
+```
+
+#### 验证备份真的能用 ⚠️
+
+**没验证过的备份等于没有备份。** 每周做一次恢复演练：
+
+```bash
+# 1. 建临时库
+sudo -u postgres psql -c "CREATE DATABASE restore_test;"
+
+# 2. 灌入最新备份
+gunzip -c /var/backups/oracle/oracle-$(date +\%F).sql.gz | sudo -u postgres psql restore_test
+
+# 3. 核对数据量
+sudo -u postgres psql restore_test -c "SELECT COUNT(*) FROM users;"
+sudo -u postgres psql restore_test -c "SELECT COUNT(*) FROM moments;"
+
+# 4. 确认无误后清理
+sudo -u postgres psql -c "DROP DATABASE restore_test;"
+```
+
+### 11.2 顺带备份管理员上传的图片
+
+后台传的图片在 `web/assets/uploads/`，**不在数据库里**，需单独备份：
+
+```bash
+tar czf /var/backups/oracle/uploads-$(date +\%F).tar.gz -C /opt/oracle-answer/web/assets uploads
+ossutil cp /var/backups/oracle/uploads-$(date +\%F).tar.gz oss://你的bucket/backups/
+```
+
 ---
 
-## 12. 常见问题
+## 12. 日常运维速查
+
+| 场景 | 命令 |
+|---|---|
+| 看服务状态 | `systemctl status oracle-answer` |
+| 看实时日志 | `journalctl -u oracle-answer -f` |
+| 看最近 100 行错误 | `journalctl -u oracle-answer -p err -n 100` |
+| 重启应用 | `systemctl restart oracle-answer` |
+| 重载 Nginx 配置 | `nginx -t && systemctl reload nginx` |
+| 手动执行备份 | `sudo /etc/cron.daily/oracle-backup` |
+| 查看备份列表 | `ls -lh /var/backups/oracle/` |
+| 数据库没起来 | `systemctl status postgresql` |
+| 看数据库连接数 | `sudo -u postgres psql -c "SELECT count(*) FROM pg_stat_activity;"` |
+| 看磁盘占用 | `df -h` |
+| 清理旧日志 | `sudo journalctl --vacuum-time=14d` |
+
+### 加一个存活自愈
+
+应用偶发崩溃时自动拉起（每 5 分钟探一次）：
+
+```bash
+sudo tee /usr/local/bin/check-oracle.sh > /dev/null <<'EOF'
+#!/bin/bash
+curl -fs http://127.0.0.1:8150/api/health > /dev/null || systemctl restart oracle-answer
+EOF
+sudo chmod +x /usr/local/bin/check-oracle.sh
+
+sudo tee /etc/cron.d/check-oracle > /dev/null <<'EOF'
+# 每 5 分钟检查一次服务存活，失败即重启
+*/5 * * * * root /usr/local/bin/check-oracle.sh
+EOF
+```
+
+> 注意 `/etc/cron.d` 的格式要求**必须有用户名**（上例是 `root`），
+> 且文件内容不能为空，注释行可作为首行。
+
+---
+
+## 13. 常见问题
 
 | 现象 | 原因与处理 |
 |---|---|
@@ -277,7 +452,7 @@ sudo systemctl restart oracle-answer
 
 ---
 
-## 13. 本地开发（对照）
+## 14. 本地开发（对照）
 
 ```bash
 cd /path/to/OracleAnswer
@@ -297,7 +472,7 @@ python3 -m venv .venv
 
 ---
 
-## 14. 用户数据存储位置（全部按账号）
+## 15. 用户数据存储位置（全部按账号）
 
 站点已无任何依赖浏览器的用户数据。下列内容都存在数据库里，**换设备登录后完全一致**：
 
@@ -363,3 +538,27 @@ WHERE conrelid = 'moments'::regclass AND contype = 'u';
 用户**首次登录**时，浏览器里遗留的 localStorage 数据会自动上传到该账号
 （片刻、收藏、偏好、报名意向）。服务端用唯一索引保证幂等，重复登录不会产生重复行。
 上传成功后本地副本会被清除。
+
+### 15.3 已知限制：后台数据与前台体验是两套来源 ⚠️
+
+**在后台新增的甲骨字或情绪图标，目前不会出现在用户的抽字流程里。**
+
+原因：前台的抽字逻辑读的是静态文件 `web/content.js`，
+而后台管理写入的是 PostgreSQL 的 `symbols` / `emotions` 表。
+两者没有打通。
+
+**当前表现**：
+
+| 操作 | 效果 |
+|---|---|
+| 后台添加甲骨字 | 后台看得到、用户抽不到 |
+| 后台修改已有甲骨字的图片/文案 | 后台生效，用户看到的仍是 `content.js` 里的旧版 |
+| 后台下架某个字 | 后台显示已下架，用户仍能抽到 |
+
+**如果需要让后台改动立刻对用户生效**，需要补一层同步：让前端加载时
+优先读数据库，没有再回退静态文件（类似 `SERVERDATA` 的思路）。
+这属于功能开发，不在本次部署范围内。
+
+> **运营建议**：上线初期，建议把 `web/content.js` 作为唯一内容源，
+> 后台只用于查看和小范围微调；等同步机制做完再把后台当作主入口。
+> 直接改数据库又期望前台变化，目前做不到。
