@@ -32,6 +32,8 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+.先读我-版本与打开说明.txt
+.版本核验.json
 
 # ---- 日志与临时文件 ----
 *.log
@@ -40,3 +42,6 @@ Thumbs.db
 
 # ---- 但保留项目要求的 assets（图片/模型/文案是网站内容，必须入库）----
 !web/assets/
+
+# ---- WorkBuddy 本地工作数据（含会话记忆，不应入库）----
+.workbuddy/
