@@ -1,6 +1,18 @@
 /* Local mobile H5 with simulated accounts/payments; no real authentication or payment service. */
 const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const {symbols,emotions,questions,ui}=window.CONTENT,byId=id=>symbols.find(s=>s.id===Number(id));
+/* [内容同步] 原为 const 解构（值拷贝，无法被接口数据替换）；改为 let 以便加载后覆盖 */
+let {symbols,emotions,questions,ui}=window.CONTENT;
+const byId=id=>symbols.find(s=>s.id===Number(id));
+/* 用服务端内容覆盖本地内容；失败时保留静态 content.js 的值，站点仍可用 */
+window.__applyContent=function(data){
+  if(!data)return false;
+  if(Array.isArray(data.symbols)&&data.symbols.length){symbols=data.symbols;}
+  if(Array.isArray(data.emotions)&&data.emotions.length){emotions=data.emotions;}
+  if(Array.isArray(data.questions)&&data.questions.length){questions=data.questions;}
+  if(data.ui)ui=Object.assign({},ui,data.ui);
+  try{window.CONTENT.symbols=symbols;window.CONTENT.emotions=emotions;window.CONTENT.questions=questions;}catch{}
+  return true;
+};
 const KEY='oracle-answer-h5-v1',dayKey=(d=new Date())=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 let storageAvailable=true;function read(k,f){try{return JSON.parse(localStorage.getItem(k))??f;}catch{storageAvailable=false;return f;}}function store(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true;}catch{storageAvailable=false;return false;}}
 let lang=read('oracle-language','zh-CN');if(!['zh-CN','zh-TW','en','ja','th','ar'].includes(lang))lang='zh-CN';

@@ -14,7 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config
 from .db import Base, engine
-from .routers import admin, auth, upload, userdata, userstate
+from .routers import admin, auth, content, upload, userdata, userstate
 
 app = FastAPI(
     title="字有答案 API",
@@ -61,6 +61,7 @@ app.include_router(auth.router)
 app.include_router(userdata.router)
 app.include_router(admin.router)
 app.include_router(upload.router)
+app.include_router(content.router)
 app.include_router(userstate.router)
 
 

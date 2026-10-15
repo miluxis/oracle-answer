@@ -7,7 +7,9 @@ function drawSymbol(symbols,emotion,previous,random=()=>crypto.getRandomValues(n
   if(Number(emotion)===48 && symbols.some(s=>s.id===26))return 26;
   const eligible=symbols.filter(s=>s.id!==Number(previous));
   if(!eligible.length)throw new Error('No symbols available');
-  const related=new Set(moodPools[emotion]||moodPools[51]);
+  const live=new Set(eligible.map(s=>s.id));
+  /* 关联池里可能含已下架的字（后台删过），过滤掉，避免无效权重 */
+  const related=new Set((moodPools[emotion]||moodPools[51]).filter(id=>live.has(id)));
   const matches=eligible.filter(s=>related.has(s.id));
   // 80% emotional associations + 20% discovery; every eligible symbol has positive weight.
   const weights=eligible.map(s=>matches.length?matches.length+(related.has(s.id)?4*eligible.length:0):1);
