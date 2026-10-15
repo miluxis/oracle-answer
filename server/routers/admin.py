@@ -214,6 +214,56 @@ def create_emotion(
     return result
 
 
+@router.delete("/symbols/{symbol_id}")
+def delete_symbol(
+    symbol_id: int,
+    admin: User = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+    hard: bool = False,
+):
+    """下架甲骨字。
+
+    默认是**软删除**（只把 is_published 置为 False）：
+    用户的「我的片刻」与「我收藏的字」里存的是 symbol_id，
+    物理删除会让这些历史记录变成空洞，且无法恢复。
+    软删除后前台立刻抽不到这个字，但历史记录仍可正常显示。
+
+    传 `?hard=true` 才真正删除行（仅在确认无任何用户数据引用时使用）。
+    """
+    sym = db.get(Symbol, symbol_id)
+    if sym is None:
+        raise fail(None, "甲骨字不存在", 404)
+
+    if hard:
+        used = db.scalar(
+            select(func.count(Moment.id)).where(Moment.symbol_id == symbol_id)
+        )
+        # favorites 是 (user_id, symbol_id) 复合主键，没有 id 列
+        used += db.scalar(
+            select(func.count(Favorite.user_id)).where(
+                Favorite.symbol_id == symbol_id
+            )
+        )
+        if used:
+            raise fail(
+                None,
+                f"该字已被 {used} 条用户记录引用，无法彻底删除；请改为「下架」",
+                409,
+            )
+        db.query(SymbolI18n).filter(SymbolI18n.symbol_id == symbol_id).delete()
+        db.delete(sym)
+        db.commit()
+        _log(db, admin, "symbol.delete", "symbol", str(symbol_id), {"hard": True})
+        db.commit()
+        return {"ok": True, "mode": "deleted"}
+
+    sym.is_published = False
+    db.commit()
+    _log(db, admin, "symbol.unpublish", "symbol", str(symbol_id), {"char": sym.char})
+    db.commit()
+    return {"ok": True, "mode": "unpublished"}
+
+
 @router.get("/meta")
 def admin_meta(_: User = Depends(require_admin), db: DBSession = Depends(get_db)):
     """下拉选项：库里实际在用的 motion，以及 mode 的固定取值与文案。"""
@@ -278,6 +328,43 @@ def update_emotion(
     result = EmotionOut.model_validate(emo)
     result.i18n = [EmotionI18nIn.model_validate(x) for x in emo.i18n]
     return result
+
+
+@router.delete("/emotions/{emotion_id}")
+def delete_emotion(
+    emotion_id: int,
+    admin: User = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+    hard: bool = False,
+):
+    """下架情绪图标。同样默认软删除，保护用户历史记录。"""
+    emo = db.get(Emotion, emotion_id)
+    if emo is None:
+        raise fail(None, "情绪图标不存在", 404)
+
+    if hard:
+        used = db.scalar(
+            select(func.count(Moment.id)).where(Moment.emotion_id == emotion_id)
+        )
+        if used:
+            raise fail(
+                None,
+                f"该情绪已被 {used} 条用户记录引用，无法彻底删除；请改为「下架」",
+                409,
+            )
+        db.query(EmotionI18n).filter(EmotionI18n.emotion_id == emotion_id).delete()
+        db.delete(emo)
+        db.commit()
+        _log(db, admin, "emotion.delete", "emotion", str(emotion_id), {"hard": True})
+        db.commit()
+        return {"ok": True, "mode": "deleted"}
+
+    emo.is_published = False
+    db.commit()
+    _log(db, admin, "emotion.unpublish", "emotion", str(emotion_id),
+         {"label": emo.label_default})
+    db.commit()
+    return {"ok": True, "mode": "unpublished"}
 
 
 # ==================== 3) 用户信息管理 ====================

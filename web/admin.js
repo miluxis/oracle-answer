@@ -261,6 +261,9 @@
           '<button class="auth-btn-primary admin-save-btn" id="sym-save">' +
             (isNew ? '创建' : '保存') + '</button>' +
           '<a class="admin-btn admin-btn-aslink" href="#oaguanli/symbols">取消</a>' +
+          (isNew ? '' :
+            '<button type="button" class="admin-btn admin-btn-danger admin-delete-btn" ' +
+              'id="sym-delete">删除这个字</button>') +
         '</div>' +
         '<p class="admin-toast" id="sym-msg" role="status"></p>' +
       '</div>';
@@ -398,6 +401,9 @@
           '<button class="auth-btn-primary admin-save-btn" id="emo-save">' +
             (isNew ? '创建' : '保存') + '</button>' +
           '<a class="admin-btn admin-btn-aslink" href="#oaguanli/emotions">取消</a>' +
+          (isNew ? '' :
+            '<button type="button" class="admin-btn admin-btn-danger admin-delete-btn" ' +
+              'id="emo-delete">删除这个情绪</button>') +
         '</div>' +
         '<p class="admin-toast" id="emo-msg" role="status"></p>' +
       '</div>';
@@ -570,6 +576,68 @@
     return e;
   }
 
+  /* ---------------- 删除 ---------------- */
+
+  /* 删除分两级：
+     - 已发布的内容 → 提示「下架」，避免误伤用户历史记录
+     - 已下架的内容 → 询问是否彻底删除
+     两种情况都会先弹确认框，管理员可以取消。 */
+  function confirmAndDelete(opts) {
+    if (!editing) return;
+    var name = opts.name || '';
+    var isOff = opts.isUnpublished(editing);
+    var text;
+
+    if (isOff) {
+      text = '「' + name + '」当前是下架状态，用户已经看不到它。\n\n' +
+             '彻底删除后无法恢复。\n' +
+             '若已有用户保存过这个字，系统会阻止删除并提示改用下架。\n\n' +
+             '确定要彻底删除吗？';
+    } else {
+      text = '确定下架「' + name + '」吗？\n\n' +
+             '下架后用户立刻抽不到这个字，但已有记录仍可正常显示。\n' +
+             '需要恢复时，在列表里重新编辑它并勾选「已发布」即可。';
+    }
+
+    if (!window.confirm(text)) return;
+
+    var url = opts.url + '/' + editing.id + (isOff ? '?hard=true' : '');
+    window.API.request(url, { method: 'DELETE' })
+      .then(function (res) {
+        cache[opts.cacheKey] = null;      // 下次重新拉取
+        editing = null;
+        location.hash = opts.listHash;
+        ensure(opts.cacheKey);
+        if (res && res.mode === 'deleted') window.alert('已彻底删除。');
+      })
+      .catch(function (e) {
+        var box = document.getElementById(opts.msgId);
+        if (box) box.textContent = e.message || '删除失败，请稍后重试';
+      });
+  }
+
+  function handleSymbolDelete() {
+    confirmAndDelete({
+      name: editing ? editing.char : '',
+      url: '/api/admin/symbols',
+      listHash: '#oaguanli/symbols',
+      cacheKey: 'symbols',
+      msgId: 'sym-msg',
+      isUnpublished: function (o) { return o.is_published === false; }
+    });
+  }
+
+  function handleEmotionDelete() {
+    confirmAndDelete({
+      name: editing ? editing.label_default : '',
+      url: '/api/admin/emotions',
+      listHash: '#oaguanli/emotions',
+      cacheKey: 'emotions',
+      msgId: 'emo-msg',
+      isUnpublished: function (o) { return o.is_published === false; }
+    });
+  }
+
   /* ---------------- 事件 ---------------- */
 
   function toggleSort(key, state) {
@@ -617,6 +685,10 @@
       }).then(loadUsers);
       return;
     }
+
+    // 删除甲骨字 / 情绪
+    if (t.closest && t.closest('#sym-delete')) { handleSymbolDelete(); return; }
+    if (t.closest && t.closest('#emo-delete')) { handleEmotionDelete(); return; }
 
     // 保存甲骨字
     if (t.closest && t.closest('#sym-save')) {
